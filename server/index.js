@@ -83,18 +83,37 @@ async function getCachedMetadata() {
   return result.rows[0] ? sanitizeMetadata(result.rows[0]) : null;
 }
 
+async function getPlatformMetrics(queryable = database) {
+  const result = await queryable.query("select rpm,tpm,sampled_at from platform_metrics where id=true");
+  const metric = result.rows[0] || { rpm: 0, tpm: 0, sampled_at: null };
+  return { rpm: Number(metric.rpm), tpm: Number(metric.tpm), sampledAt: metric.sampled_at, source: "shared_upstream_cache" };
+}
+
 async function refreshUpstreamMetrics() {
-  const client = await upstream().login();
-  const platforms = await client.getPlatforms();
-  const platformList = Array.isArray(platforms) ? platforms : [];
-  const platform = platformList.find((item) => String(item.platform_key) === client.platformKey) || platformList.find((item) => item.enabled !== false) || platformList[0];
-  if (!platform?.platform_key) throw new Error("上游平台配置不可用");
-  const metrics = await client.getRpmTpm(platform.platform_key);
-  const rpm = Number(metrics?.rpm);
-  const tpm = Number(metrics?.tpm);
-  if (!Number.isFinite(rpm) || rpm < 0 || !Number.isFinite(tpm) || tpm < 0) throw new Error("上游吞吐数据不可用");
-  const result = await database.query("update platform_metrics set rpm=$1,tpm=$2,sampled_at=now() where id=true returning rpm,tpm,sampled_at", [Math.round(rpm), Math.round(tpm)]);
-  return { rpm: Number(result.rows[0].rpm), tpm: Number(result.rows[0].tpm), sampledAt: result.rows[0].sampled_at };
+  const lockClient = await database.connect();
+  let locked = false;
+  try {
+    const lockResult = await lockClient.query("select pg_try_advisory_lock($1) as locked", [731942051]);
+    locked = Boolean(lockResult.rows[0]?.locked);
+    if (!locked) return { ...await getPlatformMetrics(lockClient), throttled: true, retryAfterMs: 1000 };
+    const cached = await getPlatformMetrics(lockClient);
+    const ageMs = cached.sampledAt ? Date.now() - new Date(cached.sampledAt).getTime() : Infinity;
+    if (ageMs < 1000) return { ...cached, throttled: true, retryAfterMs: Math.max(1, 1000 - ageMs) };
+    const client = await upstream().login();
+    const platforms = await client.getPlatforms();
+    const platformList = Array.isArray(platforms) ? platforms : [];
+    const platform = platformList.find((item) => String(item.platform_key) === client.platformKey) || platformList.find((item) => item.enabled !== false) || platformList[0];
+    if (!platform?.platform_key) throw new Error("上游平台配置不可用");
+    const metrics = await client.getRpmTpm(platform.platform_key);
+    const rpm = Number(metrics?.rpm);
+    const tpm = Number(metrics?.tpm);
+    if (!Number.isFinite(rpm) || rpm < 0 || !Number.isFinite(tpm) || tpm < 0) throw new Error("上游吞吐数据不可用");
+    const result = await lockClient.query("update platform_metrics set rpm=$1,tpm=$2,sampled_at=now() where id=true returning rpm,tpm,sampled_at", [Math.round(rpm), Math.round(tpm)]);
+    return { rpm: Number(result.rows[0].rpm), tpm: Number(result.rows[0].tpm), sampledAt: result.rows[0].sampled_at, source: "upstream", throttled: false, retryAfterMs: 0 };
+  } finally {
+    if (locked) await lockClient.query("select pg_advisory_unlock($1)", [731942051]).catch(() => {});
+    lockClient.release();
+  }
 }
 
 async function api(request, response) {
@@ -111,8 +130,8 @@ async function api(request, response) {
     if (route.startsWith("/api/admin/users/") && route.endsWith("/status") && method === "POST") { const user = await requireUser(request, response, true); if (!user) return; const id = route.split("/")[4]; const body = await parseBody(request); const result = await database.query("update app_users set is_active=$1 where id=$2 and id<>$3", [Boolean(body.isActive), id, user.id]); if (!result.rowCount) return json(response, 400, { message: "不能停用当前管理员账号" }); return json(response, 200, { ok: true }); }
     if (route === "/api/channels" && method === "GET") { const user = await requireUser(request, response); if (!user) return; const result = await database.query("select c.*, count(k.id)::int as key_count, coalesce(sum(k.usage_usd),0)::float as usage_usd, array_remove(array_agg(distinct k.status),null) as key_statuses from channel_configs c left join api_keys k on k.channel_config_id=c.id where c.owner_id=$1 group by c.id order by c.created_at desc", [user.id]); return json(response, 200, { items: result.rows.map((item) => ({ id: item.id, name: item.name, provider: item.provider, models: item.models, group: item.group_name, discount: String(item.discount), state: item.key_statuses?.includes("UPSTREAM_ERROR") ? "同步异常" : item.key_statuses?.every((status) => status === "SYNCED") ? "已同步" : "模拟记录", keyCount: item.key_count, usageUsd: item.usage_usd, createdAt: item.created_at })) }); }
     if (route === "/api/keys" && method === "GET") { const user = await requireUser(request, response); if (!user) return; const result = await database.query("select k.id,k.key_name,k.status,k.usage_usd,k.rpm,k.tpm,c.name as channel_name,c.models,c.group_name from api_keys k join channel_configs c on c.id=k.channel_config_id where k.owner_id=$1 order by k.created_at desc", [user.id]); return json(response, 200, { items: result.rows.map((item) => ({ id: item.id, name: item.key_name, channel: item.channel_name, model: item.models?.[0] || "未指定", group: item.group_name, usageUsd: Number(item.usage_usd), rpm: item.rpm, tpm: item.tpm, status: item.status })) }); }
-    if (route === "/api/metrics" && method === "GET") { const user = await requireUser(request, response); if (!user) return; const result = await database.query("select rpm,tpm,sampled_at from platform_metrics where id=true"); const metric = result.rows[0] || { rpm: 0, tpm: 0 }; return json(response, 200, { rpm: Number(metric.rpm), tpm: Number(metric.tpm), sampledAt: metric.sampled_at, source: "admin_upstream_cache" }); }
-    if (route === "/api/metrics/refresh" && method === "POST") { const user = await requireUser(request, response, true); if (!user) return; return json(response, 200, await refreshUpstreamMetrics()); }
+    if (route === "/api/metrics" && method === "GET") { const user = await requireUser(request, response); if (!user) return; return json(response, 200, await getPlatformMetrics()); }
+    if (route === "/api/metrics/refresh" && method === "POST") { const user = await requireUser(request, response); if (!user) return; return json(response, 200, await refreshUpstreamMetrics()); }
     if (route === "/api/channels" && method === "POST") { const user = await requireUser(request, response); if (!user) return; const body = await parseBody(request); const models = uniqueStrings(body.models); const typeId = Number(body.typeId); const metadata = await getCachedMetadata(); const channelType = metadata?.channelTypes.find((item) => item.id === typeId); const group = String(body.group || "default"); const allowedModels = metadata?.typeModels[String(typeId)]?.length ? metadata.typeModels[String(typeId)] : metadata?.enabledModels || []; const discount = Number(body.discount ?? 1); if (!body.name || !channelType || !models.length || models.some((model) => !allowedModels.includes(model)) || !Array.isArray(body.keys) || !body.keys.length || !metadata.groups.includes(group) || !Number.isFinite(discount) || discount < 0 || discount > 10) return json(response, 400, { message: "渠道信息不完整或已过期，请刷新配置后重试" }); if (upstreamWritesEnabled) return json(response, 503, { message: "当前版本尚未开放上游写入" }); const client = await database.connect(); try { await client.query("begin"); const config = await client.query("insert into channel_configs (owner_id,name,provider,type_id,models,model_mapping,group_name,discount,auto_disable) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *", [user.id, String(body.name).trim(), channelType.name, typeId, JSON.stringify(models), JSON.stringify(body.modelMapping || {}), group, discount, body.autoDisable !== false]); for (const [index, apiKey] of body.keys.entries()) { const value = String(apiKey).trim(); if (!value) continue; const keyName = `${String(body.name).trim()}-key-${String(index + 1).padStart(2, "0")}`; const encrypted = encryptSecret(value); await client.query("insert into api_keys (owner_id,channel_config_id,key_name,encrypted_key,key_iv,key_auth_tag,status) values ($1,$2,$3,$4,$5,$6,'SIMULATED')", [user.id, config.rows[0].id, keyName, encrypted.encrypted, encrypted.iv, encrypted.authTag]); } await client.query("commit"); return json(response, 201, { id: config.rows[0].id, upstreamSubmitted: false, mode: "simulation" }); } catch (error) { await client.query("rollback"); if (error.code === "23505") return json(response, 409, { message: "渠道名称已存在" }); throw error; } finally { client.release(); } }
     return json(response, 404, { message: "接口不存在" });
   } catch (error) { console.error(error instanceof Error ? error.message : "request failed"); return json(response, 500, { message: "服务暂时不可用" }); }
