@@ -5,9 +5,16 @@ create table if not exists app_users (
   username text not null unique,
   password_hash text not null,
   role text not null check (role in ('ADMIN', 'SUPPLIER')),
+  channel_type_id integer,
+  channel_group text,
+  channel_name_prefix text,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+alter table app_users add column if not exists channel_type_id integer;
+alter table app_users add column if not exists channel_group text;
+alter table app_users add column if not exists channel_name_prefix text;
 
 create table if not exists sessions (
   id text primary key,
