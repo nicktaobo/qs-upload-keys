@@ -47,7 +47,11 @@ create table if not exists api_keys (
   encrypted_key text not null,
   key_iv text not null,
   key_auth_tag text not null,
+  upstream_job_id text,
   upstream_channel_id text,
+  upstream_channel_key text,
+  upstream_channel_name text,
+  upstream_error text,
   status text not null default 'PENDING',
   usage_usd numeric(18, 6) not null default 0,
   rpm integer not null default 0,
@@ -56,8 +60,14 @@ create table if not exists api_keys (
   created_at timestamptz not null default now()
 );
 
+alter table api_keys add column if not exists upstream_job_id text;
+alter table api_keys add column if not exists upstream_channel_key text;
+alter table api_keys add column if not exists upstream_channel_name text;
+alter table api_keys add column if not exists upstream_error text;
+
 create index if not exists api_keys_owner_idx on api_keys(owner_id);
 create index if not exists api_keys_channel_idx on api_keys(channel_config_id);
+create index if not exists api_keys_upstream_channel_idx on api_keys(upstream_channel_id) where upstream_channel_id is not null;
 
 create table if not exists platform_metrics (
   id boolean primary key default true,

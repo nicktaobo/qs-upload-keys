@@ -198,6 +198,11 @@ async function refreshUsage() { if (state.apiMode) { try { await loadRemoteData(
 function closeModal() { state.modal = false; state.mappings = []; state.channelDraft = newChannelDraft(); render(); }
 function closeUserModal() { state.userModal = false; state.editingUserId = null; render(); }
 function toast(message) { const item = document.createElement("div"); item.className = "toast"; item.textContent = message; document.body.append(item); setTimeout(() => item.remove(), 2400); }
+function channelSubmitMessage(result) {
+  if (result.mode === "simulation") return `模拟提交成功：${result.name}`;
+  if (result.failedCount) return `本地记录已保存，上游成功 ${result.successfulCount} 枚、失败 ${result.failedCount} 枚`;
+  return `渠道已同步：${result.name}`;
+}
 async function submitChannel() {
   const keys = document.querySelector("#keys")?.value.split(/\n+/).map((item) => item.trim()).filter(Boolean) || [];
   if (state.user?.role === "supplier") {
@@ -208,7 +213,7 @@ async function submitChannel() {
       const result = await apiRequest("/api/channels", { method: "POST", body: JSON.stringify({ suffix, keys, typeId: Number(document.querySelector("#provider").value), group: document.querySelector("#group").value }) });
       await loadRemoteData();
       closeModal();
-      toast(`模拟提交成功：${result.name}`);
+      toast(channelSubmitMessage(result));
     } catch (error) { toast(error instanceof Error ? error.message : "模拟提交失败"); }
     return;
   }
@@ -221,7 +226,7 @@ async function submitChannel() {
   if (state.apiMode) {
     try {
       const result = await apiRequest("/api/channels", { method: "POST", body: JSON.stringify({ name, typeId, models, keys, group: document.querySelector("#group").value, discount: Number(document.querySelector("#discount").value), autoDisable: document.querySelector("#auto-disable").checked, modelMapping }) });
-      await loadRemoteData(); closeModal(); toast(result.upstreamSubmitted ? "渠道已同步" : "模拟提交成功，未写入上游");
+      await loadRemoteData(); closeModal(); toast(channelSubmitMessage(result));
     } catch (error) { toast(error instanceof Error ? error.message : "模拟提交失败"); }
     return;
   }

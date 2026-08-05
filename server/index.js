@@ -49,10 +49,18 @@ class UpstreamClient {
   async getGroups(platformKey) { return this.request(`/api/platforms/${encodeURIComponent(platformKey)}/groups`); }
   async getModels(platformKey) { return this.request(`/api/platforms/${encodeURIComponent(platformKey)}/models`); }
   async getRpmTpm(platformKey) { return this.request(`/api/platforms/${encodeURIComponent(platformKey)}/rpm-tpm`); }
+  async createChannels(platformKey, body) { return this.request(`/api/platforms/${encodeURIComponent(platformKey)}/channels/batch`, { method: "POST", body }); }
+  async getJobLogs(jobId) { return this.request(`/api/jobs/${encodeURIComponent(jobId)}/logs?p=1&page_size=100`); }
+  async getChannels(platformKey, params = {}) { const query = new URLSearchParams(params); return this.request(`/api/platforms/${encodeURIComponent(platformKey)}/channels?${query}`); }
 }
 const upstream = () => new UpstreamClient();
 
 const uniqueStrings = (values) => [...new Set((Array.isArray(values) ? values : []).map((item) => typeof item === "string" ? item : item?.name ?? item?.model ?? item?.id).filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()))];
+const publicUpstreamError = (value) => {
+  const message = String(value || "").replace(/https?:\/\/\S+/gi, "[已隐藏地址]").replace(/[\r\n]+/g, " ").trim();
+  return message && message.length <= 240 ? message : "上游渠道创建失败";
+};
+const jobItems = (result) => Array.isArray(result) ? result : Array.isArray(result?.items) ? result.items : [];
 const sanitizeMetadata = (row) => ({
   channelTypes: Array.isArray(row.channel_types) ? row.channel_types : [],
   groups: Array.isArray(row.groups) ? row.groups : [],
@@ -90,6 +98,66 @@ async function syncUpstreamMetadata() {
 async function getCachedMetadata() {
   const result = await database.query("select channel_types,groups,type_models,enabled_models,all_models,synced_at from upstream_metadata where id=true");
   return result.rows[0] ? sanitizeMetadata(result.rows[0]) : null;
+}
+
+async function getUpstreamSubmissionContext(client, typeId) {
+  const [platforms, profiles] = await Promise.all([client.getPlatforms(), client.getProfiles()]);
+  const platformList = Array.isArray(platforms) ? platforms : [];
+  const platform = platformList.find((item) => String(item.platform_key) === client.platformKey) || platformList.find((item) => item.enabled !== false) || platformList[0];
+  const profileList = Array.isArray(profiles) ? profiles : [];
+  const profile = profileList.find((item) => String(item.type) === String(platform?.profile_type));
+  const channelType = profile?.channel_types?.find((item) => Number(item.id) === Number(typeId));
+  if (!platform?.platform_key || !channelType) throw new Error("上游渠道类型不可用");
+  return { platformKey: String(platform.platform_key), officialBaseUrl: String(channelType.official_base_url || "") };
+}
+
+async function waitForUpstreamChannel(client, platformKey, jobId) {
+  const deadline = Date.now() + Number(env("UPSTREAM_JOB_TIMEOUT_MS") || 60000);
+  let channelId = "";
+  while (Date.now() < deadline) {
+    const logs = jobItems(await client.getJobLogs(jobId));
+    const failed = logs.find((item) => item.level === "error");
+    if (failed) throw new Error(publicUpstreamError(failed.message));
+    for (const item of logs) {
+      const match = String(item.message || "").match(/渠道ID=(\d+)/);
+      if (match) channelId = match[1];
+    }
+    if (channelId) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  if (!channelId) throw new Error("上游渠道创建超时");
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const result = await client.getChannels(platformKey, { p: "1", page_size: "10", q: channelId });
+    const channel = jobItems(result).find((item) => String(item.channel_id) === channelId);
+    if (channel) return channel;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error("上游渠道创建成功，但台账尚未就绪");
+}
+
+async function submitApiKeyUpstream(client, context, submission, record) {
+  const setting = JSON.stringify({ force_format: false, thinking_to_content: false, pass_through_body_enabled: false, system_prompt: "", system_prompt_override: false, proxy: "" });
+  const settings = JSON.stringify({ allow_service_tier: false, disable_store: false, allow_safety_identifier: false, allow_include_obfuscation: false });
+  const channelFields = {
+    type: submission.typeId,
+    base_url: context.officialBaseUrl,
+    models: submission.models.join(","),
+    group: submission.group,
+    auto_ban: submission.autoDisable ? 1 : 0,
+    priority: 0,
+    weight: 0,
+    status: 1,
+    setting,
+    settings
+  };
+  if (Object.keys(submission.modelMapping).length) channelFields.model_mapping = JSON.stringify(submission.modelMapping);
+  const created = await client.createChannels(context.platformKey, { type: submission.typeId, channel_fields: channelFields, keys: [record.value], batch: false, name: submission.name, discount: submission.discount });
+  const jobId = String(created?.job_id || "");
+  if (!jobId) throw new Error("上游未返回任务 ID");
+  await database.query("update api_keys set upstream_job_id=$1 where id=$2", [jobId, record.id]);
+  const channel = await waitForUpstreamChannel(client, context.platformKey, jobId);
+  await database.query("update api_keys set upstream_channel_id=$1,upstream_channel_key=$2,upstream_channel_name=$3,upstream_error=null,status='SYNCED',last_synced_at=now() where id=$4", [String(channel.channel_id), String(channel.channel_key || ""), String(channel.name || submission.name), record.id]);
+  return { keyId: record.id, channelId: String(channel.channel_id) };
 }
 
 function resolveChannelTemplate(metadata, body) {
@@ -147,7 +215,7 @@ async function api(request, response) {
     if (route === "/api/admin/users" && method === "POST") { const user = await requireUser(request, response, true); if (!user) return; const body = await parseBody(request); const username = String(body.username || "").trim(); if (!username || String(body.password || "").length < 8) return json(response, 400, { message: "用户名不能为空，密码至少需要 8 位" }); const role = body.role === "管理员" ? "ADMIN" : "SUPPLIER"; const metadata = role === "SUPPLIER" ? await getCachedMetadata() : null; const template = role === "SUPPLIER" ? resolveChannelTemplate(metadata, body) : null; if (role === "SUPPLIER" && !template) return json(response, 400, { message: "请选择有效的渠道类型和分组，并填写不超过 80 个字符的渠道名前缀" }); const result = await database.query("insert into app_users (username,password_hash,role,channel_type_id,channel_group,channel_name_prefix) values ($1,$2,$3,$4,$5,$6) returning *", [username, hashPassword(String(body.password)), role, template?.typeId || null, template?.group || null, template?.prefix || null]).catch((error) => error.code === "23505" ? null : Promise.reject(error)); if (!result) return json(response, 409, { message: "用户名已存在" }); return json(response, 201, { user: sanitizeUser(result.rows[0]) }); }
     if (route.startsWith("/api/admin/users/") && route.endsWith("/template") && method === "POST") { const user = await requireUser(request, response, true); if (!user) return; const id = route.split("/")[4]; const body = await parseBody(request); const metadata = await getCachedMetadata(); const template = resolveChannelTemplate(metadata, body); if (!template) return json(response, 400, { message: "请选择有效的渠道类型和分组，并填写不超过 80 个字符的渠道名前缀" }); const result = await database.query("update app_users set channel_type_id=$1,channel_group=$2,channel_name_prefix=$3 where id=$4 and role='SUPPLIER' returning *", [template.typeId, template.group, template.prefix, id]); if (!result.rowCount) return json(response, 404, { message: "供应商用户不存在" }); return json(response, 200, { user: sanitizeUser(result.rows[0]) }); }
     if (route.startsWith("/api/admin/users/") && route.endsWith("/status") && method === "POST") { const user = await requireUser(request, response, true); if (!user) return; const id = route.split("/")[4]; const body = await parseBody(request); const result = await database.query("update app_users set is_active=$1 where id=$2 and id<>$3", [Boolean(body.isActive), id, user.id]); if (!result.rowCount) return json(response, 400, { message: "不能停用当前管理员账号" }); return json(response, 200, { ok: true }); }
-    if (route === "/api/channels" && method === "GET") { const user = await requireUser(request, response); if (!user) return; const result = await database.query("select c.*, count(k.id)::int as key_count, coalesce(sum(k.usage_usd),0)::float as usage_usd, array_remove(array_agg(distinct k.status),null) as key_statuses from channel_configs c left join api_keys k on k.channel_config_id=c.id where c.owner_id=$1 group by c.id order by c.created_at desc", [user.id]); return json(response, 200, { items: result.rows.map((item) => ({ id: item.id, name: item.name, provider: item.provider, models: item.models, group: item.group_name, discount: String(item.discount), state: item.key_statuses?.includes("UPSTREAM_ERROR") ? "同步异常" : item.key_statuses?.every((status) => status === "SYNCED") ? "已同步" : "模拟记录", keyCount: item.key_count, usageUsd: item.usage_usd, createdAt: item.created_at })) }); }
+    if (route === "/api/channels" && method === "GET") { const user = await requireUser(request, response); if (!user) return; const result = await database.query("select c.*, count(k.id)::int as key_count, coalesce(sum(k.usage_usd),0)::float as usage_usd, array_remove(array_agg(distinct k.status),null) as key_statuses from channel_configs c left join api_keys k on k.channel_config_id=c.id where c.owner_id=$1 group by c.id order by c.created_at desc", [user.id]); return json(response, 200, { items: result.rows.map((item) => ({ id: item.id, name: item.name, provider: item.provider, models: item.models, group: item.group_name, discount: String(item.discount), state: item.key_statuses?.includes("UPSTREAM_ERROR") ? "同步异常" : item.key_statuses?.every((status) => status === "SYNCED") ? "已同步" : item.key_statuses?.includes("PENDING") ? "同步中" : "模拟记录", keyCount: item.key_count, usageUsd: item.usage_usd, createdAt: item.created_at })) }); }
     if (route === "/api/keys" && method === "GET") { const user = await requireUser(request, response); if (!user) return; const result = await database.query("select k.id,k.key_name,k.status,k.usage_usd,k.rpm,k.tpm,c.name as channel_name,c.models,c.group_name from api_keys k join channel_configs c on c.id=k.channel_config_id where k.owner_id=$1 order by k.created_at desc", [user.id]); return json(response, 200, { items: result.rows.map((item) => ({ id: item.id, name: item.key_name, channel: item.channel_name, model: item.models?.[0] || "未指定", group: item.group_name, usageUsd: Number(item.usage_usd), rpm: item.rpm, tpm: item.tpm, status: item.status })) }); }
     if (route === "/api/metrics" && method === "GET") { const user = await requireUser(request, response); if (!user) return; return json(response, 200, await getPlatformMetrics()); }
     if (route === "/api/metrics/refresh" && method === "POST") { const user = await requireUser(request, response); if (!user) return; return json(response, 200, await refreshUpstreamMetrics()); }
@@ -169,24 +237,51 @@ async function api(request, response) {
       const modelMapping = isSupplier ? {} : body.modelMapping || {};
       const autoDisable = isSupplier ? true : body.autoDisable !== false;
       const invalidSupplierName = isSupplier && (!suffix || suffix.length > 80 || name.length > 160);
-      if (!metadata || invalidSupplierName || !name || name.length > 160 || !channelType || !models.length || models.some((model) => !allowedModels.includes(model)) || !keys.length || !metadata.groups.includes(group) || !Number.isFinite(discount) || discount < 0 || discount > 10) return json(response, 400, { message: isSupplier ? "请填写不超过 80 个字符的渠道后缀和至少一枚 Key" : "渠道信息不完整或已过期，请刷新配置后重试" });
-      if (upstreamWritesEnabled) return json(response, 503, { message: "当前版本尚未开放上游写入" });
-      const client = await database.connect();
+      if (!metadata || invalidSupplierName || !name || name.length > 160 || !channelType || !models.length || models.some((model) => !allowedModels.includes(model)) || !keys.length || !metadata.groups.includes(group) || !Number.isFinite(discount) || discount <= 0 || discount > 1) return json(response, 400, { message: isSupplier ? "请填写不超过 80 个字符的渠道后缀和至少一枚 Key" : "渠道信息不完整或已过期，请刷新配置后重试" });
+      const dbClient = await database.connect();
+      let config;
+      const records = [];
       try {
-        await client.query("begin");
-        const config = await client.query("insert into channel_configs (owner_id,name,provider,type_id,models,model_mapping,group_name,discount,auto_disable) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *", [user.id, name, channelType.name, typeId, JSON.stringify(models), JSON.stringify(modelMapping), group, discount, autoDisable]);
+        await dbClient.query("begin");
+        config = await dbClient.query("insert into channel_configs (owner_id,name,provider,type_id,models,model_mapping,group_name,discount,auto_disable) values ($1,$2,$3,$4,$5,$6,$7,$8,$9) returning *", [user.id, name, channelType.name, typeId, JSON.stringify(models), JSON.stringify(modelMapping), group, discount, autoDisable]);
         for (const [index, value] of keys.entries()) {
           const keyName = `${name}-key-${String(index + 1).padStart(2, "0")}`;
           const encrypted = encryptSecret(value);
-          await client.query("insert into api_keys (owner_id,channel_config_id,key_name,encrypted_key,key_iv,key_auth_tag,status) values ($1,$2,$3,$4,$5,$6,'SIMULATED')", [user.id, config.rows[0].id, keyName, encrypted.encrypted, encrypted.iv, encrypted.authTag]);
+          const inserted = await dbClient.query("insert into api_keys (owner_id,channel_config_id,key_name,encrypted_key,key_iv,key_auth_tag,status) values ($1,$2,$3,$4,$5,$6,$7) returning id", [user.id, config.rows[0].id, keyName, encrypted.encrypted, encrypted.iv, encrypted.authTag, upstreamWritesEnabled ? "PENDING" : "SIMULATED"]);
+          records.push({ id: inserted.rows[0].id, value });
         }
-        await client.query("commit");
-        return json(response, 201, { id: config.rows[0].id, name, upstreamSubmitted: false, mode: "simulation" });
+        await dbClient.query("commit");
       } catch (error) {
-        await client.query("rollback");
+        await dbClient.query("rollback");
         if (error.code === "23505") return json(response, 409, { message: "渠道名称已存在，请更换后缀" });
         throw error;
-      } finally { client.release(); }
+      } finally { dbClient.release(); }
+      if (!upstreamWritesEnabled) return json(response, 201, { id: config.rows[0].id, name, upstreamSubmitted: false, mode: "simulation", successfulCount: 0, failedCount: 0 });
+      const submission = { name, typeId, models, modelMapping, group, discount, autoDisable };
+      let upstreamClient;
+      let context;
+      try {
+        upstreamClient = await upstream().login();
+        context = await getUpstreamSubmissionContext(upstreamClient, typeId);
+      } catch (error) {
+        const message = publicUpstreamError(error instanceof Error ? error.message : "");
+        await database.query("update api_keys set status='UPSTREAM_ERROR',upstream_error=$1,last_synced_at=now() where channel_config_id=$2 and status='PENDING'", [message, config.rows[0].id]);
+        return json(response, 201, { id: config.rows[0].id, name, upstreamSubmitted: false, mode: "upstream", successfulCount: 0, failedCount: records.length });
+      }
+      let successfulCount = 0;
+      let failedCount = 0;
+      for (const record of records) {
+        try {
+          await submitApiKeyUpstream(upstreamClient, context, submission, record);
+          successfulCount += 1;
+        } catch (error) {
+          failedCount += 1;
+          const message = publicUpstreamError(error instanceof Error ? error.message : "");
+          await database.query("update api_keys set status='UPSTREAM_ERROR',upstream_error=$1,last_synced_at=now() where id=$2", [message, record.id]);
+          console.error(`upstream channel submission failed: ${message}`);
+        }
+      }
+      return json(response, 201, { id: config.rows[0].id, name, upstreamSubmitted: successfulCount > 0, mode: "upstream", successfulCount, failedCount });
     }
     return json(response, 404, { message: "接口不存在" });
   } catch (error) { console.error(error instanceof Error ? error.message : "request failed"); return json(response, 500, { message: "服务暂时不可用" }); }

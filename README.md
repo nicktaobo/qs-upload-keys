@@ -20,6 +20,8 @@
    - `UPSTREAM_BASE_URL`、`UPSTREAM_USERNAME`、`UPSTREAM_PASSWORD`：上游只读同步配置。
    - `UPSTREAM_WRITE_ENABLED=false`：保持模拟提交，不写入上游。
 
+   发布前可继续保持 `UPSTREAM_WRITE_ENABLED=false` 验证本地落库流程。需要正式提交时改为 `true`；应用会先保存本地记录，再逐枚 Key 创建上游渠道，并回填上游任务 ID、渠道 ID、渠道 key 和实际上游名称。上游失败时本地记录不会丢失，而是标记为“同步异常”。
+
    可使用以下命令生成密钥：
 
    ```bash
