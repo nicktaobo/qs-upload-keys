@@ -11,7 +11,7 @@ const defaultUsers = [
 const state = {
   channels: JSON.parse(localStorage.getItem("qushu-channels") || "null") || defaultChannels,
   users: JSON.parse(localStorage.getItem("qushu-users") || "null") || defaultUsers,
-  page: "overview", modal: false, userModal: false, editingUserId: null, batch: false, mappings: [], usageUpdated: "09:09:40",
+  page: "overview", modal: false, userModal: false, editingUserId: null, userTemplateDraft: null, batch: false, mappings: [], usageUpdated: "09:09:40",
   traffic: { rpm: 3056, tpm: 45550206 },
   metadata: { channelTypes: [], groups: [], typeModels: {}, enabledModels: [], allModels: [], syncedAt: null, submissionMode: "simulation" },
   channelDraft: { typeId: "", name: "", suffix: "", discount: "1.000", keys: "", group: "default", models: null, autoDisable: true }
@@ -35,6 +35,21 @@ const totalKeys = () => state.channels.reduce((sum, channel) => sum + channel.ke
 const formatTime = (value) => value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "尚未同步";
 const modelsForType = (typeId) => state.metadata.typeModels[String(typeId)]?.length ? state.metadata.typeModels[String(typeId)] : state.metadata.enabledModels;
 const channelTypeName = (typeId) => state.metadata.channelTypes.find((item) => item.id === Number(typeId))?.name || "未分配";
+const selectedTemplateModels = (typeId, models) => {
+  const allowed = modelsForType(typeId);
+  const selected = Array.isArray(models) ? models.filter((model) => allowed.includes(model)) : [];
+  return selected.length ? selected : allowed;
+};
+const newUserTemplateDraft = (user = null) => {
+  const template = user?.channelTemplate;
+  const typeId = String(template?.typeId || state.metadata.channelTypes[0]?.id || "");
+  return {
+    typeId,
+    group: template?.group || (state.metadata.groups.includes("default") ? "default" : state.metadata.groups[0] || ""),
+    prefix: template?.prefix || "",
+    models: selectedTemplateModels(typeId, template?.models)
+  };
+};
 const newChannelDraft = () => {
   const template = state.user?.role === "supplier" ? state.user.channelTemplate : null;
   return { typeId: String(template?.typeId || state.metadata.channelTypes[0]?.id || ""), name: "", suffix: "", discount: "1.000", keys: "", group: template?.group || (state.metadata.groups.includes("default") ? "default" : (state.metadata.groups[0] || "")), models: null, autoDisable: true };
@@ -104,7 +119,7 @@ function myKeysPage() {
 }
 
 function usersPage() {
-  return `<section class="content"><div class="page-band"><div><p class="eyebrow">ACCESS CONTROL / 04</p><h1>用户管理</h1><p class="subline">创建供应商账号时，同时分配默认渠道类型、默认分组和名称前缀。</p></div><button class="primary-button" id="open-user-modal">${icon("plus")} 创建用户</button></div><div class="permission-strip"><span class="permission-icon">${icon("lock")}</span><div><strong>账号级渠道默认值</strong><p>供应商上传时默认选中管理员配置的类型和分组，也可以按本次渠道调整；名称前缀保持固定。</p></div></div><div class="table-wrap user-table"><table><thead><tr><th>用户名</th><th>角色</th><th>渠道默认值</th><th>状态</th><th>已接入 Key</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${state.users.map((user) => `<tr><td><div class="user-cell"><span class="avatar small-avatar">${esc(user.username.slice(0, 2).toUpperCase())}</span><strong>${esc(user.username)}</strong></div></td><td><span class="role-tag">${esc(user.role)}</span></td><td>${user.role === "供应商" ? user.channelTemplate ? `<div class="template-cell"><strong>${esc(channelTypeName(user.channelTemplate.typeId))} · ${esc(user.channelTemplate.group)}</strong><small>${esc(user.channelTemplate.prefix)} + 后缀</small></div>` : `<span class="status-badge danger">待配置</span>` : `<span class="muted-cell">不适用</span>`}</td><td><span class="status-badge ${user.status === "正常" ? "success" : "danger"}">${esc(user.status)}</span></td><td>${user.keys}</td><td class="mono">${esc(user.createdAt)}</td><td><div class="user-actions">${user.role === "供应商" ? `<button class="row-action" data-configure-user="${esc(user.id)}">配置</button>` : ""}<button class="row-action" data-toggle-user="${esc(user.id)}" data-user-active="${user.status === "正常"}" ${user.username === state.user?.username ? "disabled" : ""}>${user.status === "正常" ? "停用" : "启用"}</button></div></td></tr>`).join("")}</tbody></table></div></section>`;
+  return `<section class="content"><div class="page-band"><div><p class="eyebrow">ACCESS CONTROL / 04</p><h1>用户管理</h1><p class="subline">创建供应商账号时，同时分配默认渠道类型、分组、模型和名称前缀。</p></div><button class="primary-button" id="open-user-modal">${icon("plus")} 创建用户</button></div><div class="permission-strip"><span class="permission-icon">${icon("lock")}</span><div><strong>账号级渠道默认值</strong><p>供应商上传时默认选中管理员配置的类型、分组和模型，也可以按本次渠道调整；名称前缀保持固定。</p></div></div><div class="table-wrap user-table"><table><thead><tr><th>用户名</th><th>角色</th><th>渠道默认值</th><th>状态</th><th>已接入 Key</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${state.users.map((user) => `<tr><td><div class="user-cell"><span class="avatar small-avatar">${esc(user.username.slice(0, 2).toUpperCase())}</span><strong>${esc(user.username)}</strong></div></td><td><span class="role-tag">${esc(user.role)}</span></td><td>${user.role === "供应商" ? user.channelTemplate ? `<div class="template-cell"><strong>${esc(channelTypeName(user.channelTemplate.typeId))} · ${esc(user.channelTemplate.group)}</strong><small>${user.channelTemplate.models?.length || 0} 个模型 · ${esc(user.channelTemplate.prefix)} + 后缀</small></div>` : `<span class="status-badge danger">待配置</span>` : `<span class="muted-cell">不适用</span>`}</td><td><span class="status-badge ${user.status === "正常" ? "success" : "danger"}">${esc(user.status)}</span></td><td>${user.keys}</td><td class="mono">${esc(user.createdAt)}</td><td><div class="user-actions">${user.role === "供应商" ? `<button class="row-action" data-configure-user="${esc(user.id)}">配置</button>` : ""}<button class="row-action" data-toggle-user="${esc(user.id)}" data-user-active="${user.status === "正常"}" ${user.username === state.user?.username ? "disabled" : ""}>${user.status === "正常" ? "停用" : "启用"}</button></div></td></tr>`).join("")}</tbody></table></div></section>`;
 }
 
 function settingsPage() {
@@ -118,30 +133,33 @@ function channelModal() {
   const typeId = String(state.channelDraft.typeId || (isSupplier ? template?.typeId : types[0]?.id) || "");
   const currentType = types.find((item) => String(item.id) === typeId);
   const models = modelsForType(typeId);
-  const selectedModels = state.channelDraft.models === null ? models : state.channelDraft.models;
+  const templateDefaults = isSupplier && Number(typeId) === Number(template?.typeId) ? selectedTemplateModels(typeId, template?.models) : models;
+  const selectedModels = (state.channelDraft.models === null ? templateDefaults : state.channelDraft.models).filter((model) => models.includes(model));
+  const isUpstream = state.metadata.submissionMode === "upstream";
   const keyCount = state.channelDraft.keys.split(/\n+/).map((item) => item.trim()).filter(Boolean).length;
-  const templateReady = Boolean(template && currentType && state.metadata.groups.includes(state.channelDraft.group) && models.length);
+  const templateReady = Boolean(template && currentType && state.metadata.groups.includes(state.channelDraft.group) && selectedModels.length);
   const keyField = `<label class="field full"><span>Key <b>*</b><small class="field-help">每行一个，开启批量添加后可一次提交多枚</small></span><textarea id="keys" rows="${state.batch ? 4 : 2}" placeholder="请输入渠道对应的鉴权密钥">${esc(state.channelDraft.keys)}</textarea><label class="toggle-line"><input id="batch" type="checkbox" ${state.batch ? "checked" : ""}><span>批量添加</span><small id="key-counter">${state.batch ? `${keyCount} 枚待提交` : "单枚 Key"}</small></label></label>`;
-  const supplierForm = templateReady ? `<div class="template-summary"><div><span>固定名称前缀</span><strong>${esc(template.prefix)}</strong></div><div><span>当前自动模型</span><strong>${models.length} 个</strong></div><div><span>默认配置</span><strong>${esc(channelTypeName(template.typeId))} · ${esc(template.group)}</strong></div></div><div class="form-grid supplier-key-form"><label class="field"><span>渠道类型 <b>*</b><small class="field-help">默认已选中，可调整</small></span><select id="provider">${types.map((item) => `<option value="${item.id}" ${String(item.id) === typeId ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><label class="field"><span>分组 <b>*</b><small class="field-help">默认已选中，可调整</small></span><select id="group">${state.metadata.groups.map((group) => `<option value="${esc(group)}" ${group === state.channelDraft.group ? "selected" : ""}>${esc(group)}</option>`).join("")}</select></label><label class="field full"><span>渠道后缀 <b>*</b><small class="field-help">最终名称由固定前缀与后缀直接拼接</small></span><div class="prefix-input"><span>${esc(template.prefix)}</span><input id="channel-suffix" value="${esc(state.channelDraft.suffix)}" maxlength="80" placeholder="例如：openai-01"></div><small class="channel-name-preview">最终渠道名：<b id="channel-name-preview">${esc(`${template.prefix}${state.channelDraft.suffix}`)}</b></small></label>${keyField}</div>` : `<div class="empty modal-empty">当前账号还没有可用的渠道默认值，请联系管理员分配类型、分组和渠道名前缀。</div>`;
-  const adminForm = types.length ? `<div class="form-grid"><label class="field full"><span>类型 <b>*</b><small class="field-help">${esc(currentType?.authMethods?.join(" / ") || "上游同步")}</small></span><select id="provider">${types.map((item) => `<option value="${item.id}" ${String(item.id) === typeId ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><label class="field"><span>折扣 <b>*</b></span><div class="number-input"><button type="button" data-step="-0.01">−</button><input id="discount" type="number" step="0.001" min="0" max="10" value="${esc(state.channelDraft.discount)}"><button type="button" data-step="0.01">+</button></div></label><label class="field"><span>渠道名称 <b>*</b></span><input id="channel-name" value="${esc(state.channelDraft.name)}" placeholder="例如：production-openai"></label>${keyField}<label class="field"><span>分组 <b>*</b></span><select id="group">${state.metadata.groups.map((group) => `<option value="${esc(group)}" ${group === state.channelDraft.group ? "selected" : ""}>${esc(group)}</option>`).join("")}</select></label><label class="field"><span>当前可选模型</span><div class="field-readout">${models.length} 个</div></label><label class="field full"><span>模型 <b>*</b><small class="field-help">按当前渠道类型自动筛选</small></span><div class="chips model-picker" id="model-chips">${models.map((model) => `<button type="button" class="chip ${selectedModels.includes(model) ? "selected" : ""}" data-model="${esc(model)}">${esc(model)} <span>×</span></button>`).join("") || `<span class="empty-inline">该类型没有可用模型，请先同步配置数据</span>`}</div><button type="button" class="outline-button" id="fill-models">${icon("check")} 全选当前模型</button></label><div class="field full"><span>高级设置</span><div class="advanced"><label class="toggle-line"><input id="auto-disable" type="checkbox" ${state.channelDraft.autoDisable ? "checked" : ""}><span>自动禁用</span><small>后续真实同步时，测试失败自动停用</small></label><div id="mapping-list">${state.mappings.map((item, index) => mappingRow(index, item)).join("")}</div><button type="button" class="text-button" id="add-mapping">${icon("plus")} 添加模型重定向</button></div></div></div>` : `<div class="empty modal-empty">还没有可用配置，请由管理员先同步配置数据。</div>`;
+  const supplierForm = templateReady ? `<div class="template-summary"><div><span>固定名称前缀</span><strong>${esc(template.prefix)}</strong></div><div><span>已选模型</span><strong>${selectedModels.length} / ${models.length} 个</strong></div><div><span>默认配置</span><strong>${esc(channelTypeName(template.typeId))} · ${esc(template.group)}</strong></div></div><div class="form-grid supplier-key-form"><label class="field"><span>渠道类型 <b>*</b><small class="field-help">默认已选中，可调整</small></span><select id="provider">${types.map((item) => `<option value="${item.id}" ${String(item.id) === typeId ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><label class="field"><span>分组 <b>*</b><small class="field-help">默认已选中，可调整</small></span><select id="group">${state.metadata.groups.map((group) => `<option value="${esc(group)}" ${group === state.channelDraft.group ? "selected" : ""}>${esc(group)}</option>`).join("")}</select></label><label class="field full"><span>模型 <b>*</b><small class="field-help">管理员默认值已选中，可调整</small></span><div class="chips model-picker" id="model-chips">${models.map((model) => `<button type="button" class="chip ${selectedModels.includes(model) ? "selected" : ""}" data-model="${esc(model)}">${esc(model)} <span>×</span></button>`).join("")}</div><button type="button" class="outline-button" id="fill-models">${icon("check")} 全选当前模型</button></label><label class="field full"><span>渠道后缀 <b>*</b><small class="field-help">最终名称由固定前缀与后缀直接拼接</small></span><div class="prefix-input"><span>${esc(template.prefix)}</span><input id="channel-suffix" value="${esc(state.channelDraft.suffix)}" maxlength="80" placeholder="例如：openai-01"></div><small class="channel-name-preview">最终渠道名：<b id="channel-name-preview">${esc(`${template.prefix}${state.channelDraft.suffix}`)}</b></small></label>${keyField}</div>` : `<div class="empty modal-empty">当前账号还没有可用的渠道默认值，请联系管理员分配类型、分组、模型和渠道名前缀。</div>`;
+  const adminForm = types.length ? `<div class="form-grid"><label class="field full"><span>类型 <b>*</b><small class="field-help">${esc(currentType?.authMethods?.join(" / ") || "上游同步")}</small></span><select id="provider">${types.map((item) => `<option value="${item.id}" ${String(item.id) === typeId ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><label class="field"><span>折扣 <b>*</b></span><div class="number-input"><button type="button" data-step="-0.01">−</button><input id="discount" type="number" step="0.001" min="0.001" max="1" value="${esc(state.channelDraft.discount)}"><button type="button" data-step="0.01">+</button></div></label><label class="field"><span>渠道名称 <b>*</b></span><input id="channel-name" value="${esc(state.channelDraft.name)}" placeholder="例如：production-openai"></label>${keyField}<label class="field"><span>分组 <b>*</b></span><select id="group">${state.metadata.groups.map((group) => `<option value="${esc(group)}" ${group === state.channelDraft.group ? "selected" : ""}>${esc(group)}</option>`).join("")}</select></label><label class="field"><span>当前可选模型</span><div class="field-readout">${models.length} 个</div></label><label class="field full"><span>模型 <b>*</b><small class="field-help">按当前渠道类型自动筛选</small></span><div class="chips model-picker" id="model-chips">${models.map((model) => `<button type="button" class="chip ${selectedModels.includes(model) ? "selected" : ""}" data-model="${esc(model)}">${esc(model)} <span>×</span></button>`).join("") || `<span class="empty-inline">该类型没有可用模型，请先同步配置数据</span>`}</div><button type="button" class="outline-button" id="fill-models">${icon("check")} 全选当前模型</button></label><div class="field full"><span>高级设置</span><div class="advanced"><label class="toggle-line"><input id="auto-disable" type="checkbox" ${state.channelDraft.autoDisable ? "checked" : ""}><span>自动禁用</span><small>后续真实同步时，测试失败自动停用</small></label><div id="mapping-list">${state.mappings.map((item, index) => mappingRow(index, item)).join("")}</div><button type="button" class="text-button" id="add-mapping">${icon("plus")} 添加模型重定向</button></div></div></div>` : `<div class="empty modal-empty">还没有可用配置，请由管理员先同步配置数据。</div>`;
   const canSubmit = isSupplier ? templateReady : types.length > 0;
-  return `<div class="modal-backdrop" id="modal-backdrop"><section class="modal ${isSupplier ? "supplier-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><div><p class="eyebrow">${isSupplier ? "UPLOAD KEY / ACCOUNT DEFAULTS" : "NEW CHANNEL / SIMULATION"}</p><h2 id="modal-title">${isSupplier ? "上传 Key" : "添加渠道"}</h2></div><button class="close-button" id="close-modal" title="关闭">${icon("close")}</button></div><div class="modal-scroll"><div class="callout simulation-callout"><span>${icon("lock")}</span><div><strong>${isSupplier ? "已载入账号默认配置" : "当前为模拟提交"}</strong><small>${isSupplier ? "类型和分组可以调整；渠道名前缀固定，模型按所选类型自动配置" : "类型、模型和分组来自上游实时配置；本次只保存到本平台，不会写入上游"}</small></div><time>${esc(formatTime(state.metadata.syncedAt))}</time></div>${isSupplier ? supplierForm : adminForm}</div><div class="modal-foot"><span><i class="secure-dot"></i> Key 不在前端留存</span><div><button class="secondary-button" id="cancel-modal">取消</button><button class="primary-button" id="submit-channel" ${canSubmit ? "" : "disabled"}>${icon("arrow")} 模拟提交</button></div></div></section></div>`;
+  return `<div class="modal-backdrop" id="modal-backdrop"><section class="modal ${isSupplier ? "supplier-modal" : ""}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-head"><div><p class="eyebrow">${isSupplier ? "UPLOAD KEY / ACCOUNT DEFAULTS" : `NEW CHANNEL / ${isUpstream ? "UPSTREAM" : "SIMULATION"}`}</p><h2 id="modal-title">${isSupplier ? "上传 Key" : "添加渠道"}</h2></div><button class="close-button" id="close-modal" title="关闭">${icon("close")}</button></div><div class="modal-scroll"><div class="callout ${isUpstream ? "" : "simulation-callout"}"><span>${icon("lock")}</span><div><strong>${isSupplier ? "已载入账号默认配置" : isUpstream ? "真实提交已开启" : "当前为模拟提交"}</strong><small>${isSupplier ? `类型、分组和模型可以调整；本次${isUpstream ? "将创建上游渠道" : "只保存到本平台"}` : isUpstream ? "提交后先保存本地记录，再创建上游渠道并回填状态" : "类型、模型和分组来自上游实时配置；本次只保存到本平台"}</small></div><time>${esc(formatTime(state.metadata.syncedAt))}</time></div>${isSupplier ? supplierForm : adminForm}</div><div class="modal-foot"><span><i class="secure-dot"></i> Key 不在前端留存</span><div><button class="secondary-button" id="cancel-modal">取消</button><button class="primary-button" id="submit-channel" ${canSubmit ? "" : "disabled"}>${icon("arrow")} ${isUpstream ? "提交上游" : "模拟提交"}</button></div></div></section></div>`;
 }
 
 function userModal() {
   const editingUser = state.users.find((item) => item.id === state.editingUserId);
-  const template = editingUser?.channelTemplate;
-  const typeId = String(template?.typeId || state.metadata.channelTypes[0]?.id || "");
-  const group = template?.group || (state.metadata.groups.includes("default") ? "default" : state.metadata.groups[0] || "");
-  const templateFields = `<div class="field full template-section" id="supplier-template-fields"><span>供应商渠道默认值</span><div class="template-form-grid"><label class="field"><span>默认渠道类型 <b>*</b></span><select id="new-channel-type">${state.metadata.channelTypes.map((item) => `<option value="${item.id}" ${String(item.id) === typeId ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><label class="field"><span>默认分组 <b>*</b></span><select id="new-channel-group">${state.metadata.groups.map((item) => `<option value="${esc(item)}" ${item === group ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></label><label class="field full"><span>固定渠道名前缀 <b>*</b><small class="field-help">建议包含分隔符，例如 supplier-001-</small></span><input id="new-channel-prefix" maxlength="80" value="${esc(template?.prefix || "")}" placeholder="例如：supplier-001-"></label></div></div>`;
+  const draft = state.userTemplateDraft || newUserTemplateDraft(editingUser);
+  const typeId = String(draft.typeId);
+  const availableModels = modelsForType(typeId);
+  const templateModels = selectedTemplateModels(typeId, draft.models);
+  const templateFields = `<div class="field full template-section" id="supplier-template-fields"><span>供应商渠道默认值</span><div class="template-form-grid"><label class="field"><span>默认渠道类型 <b>*</b></span><select id="new-channel-type">${state.metadata.channelTypes.map((item) => `<option value="${item.id}" ${String(item.id) === typeId ? "selected" : ""}>${esc(item.name)}</option>`).join("")}</select></label><label class="field"><span>默认分组 <b>*</b></span><select id="new-channel-group">${state.metadata.groups.map((item) => `<option value="${esc(item)}" ${item === draft.group ? "selected" : ""}>${esc(item)}</option>`).join("")}</select></label><label class="field full"><span>默认模型 <b>*</b><small class="field-help">用户上传时自动选中，仍可调整</small></span><div class="chips model-picker template-model-picker">${availableModels.map((model) => `<button type="button" class="chip ${templateModels.includes(model) ? "selected" : ""}" data-template-model="${esc(model)}">${esc(model)} <span>×</span></button>`).join("") || `<span class="empty-inline">该类型没有可用模型</span>`}</div><button type="button" class="outline-button" id="fill-template-models">${icon("check")} 全选当前模型</button></label><label class="field full"><span>固定渠道名前缀 <b>*</b><small class="field-help">建议包含分隔符，例如 supplier-001-</small></span><input id="new-channel-prefix" maxlength="80" value="${esc(draft.prefix)}" placeholder="例如：supplier-001-"></label></div></div>`;
   const identityFields = editingUser ? `<div class="field full"><span>供应商账号</span><div class="field-readout">${esc(editingUser.username)}</div></div>` : `<label class="field full"><span>用户名 <b>*</b></span><input id="new-username" placeholder="例如：supplier-001"></label><label class="field full"><span>初始密码 <b>*</b></span><input id="new-password" type="password" placeholder="至少 8 位"></label><label class="field full"><span>角色</span><select id="new-role"><option>供应商</option><option>管理员</option></select></label>`;
-  return `<div class="modal-backdrop" id="user-modal-backdrop"><section class="modal account-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><p class="eyebrow">ADMIN ONLY / ${editingUser ? "DEFAULTS" : "ACCOUNT"}</p><h2>${editingUser ? "配置渠道默认值" : "创建平台用户"}</h2></div><button class="close-button" id="close-user-modal" title="关闭">${icon("close")}</button></div><div class="modal-scroll"><div class="callout"><span>${icon("users")}</span><div><strong>${editingUser ? "调整账号默认配置" : "创建账号并分配渠道默认值"}</strong><small>供应商进入上传面板时自动选中，类型和分组仍可调整</small></div></div><div class="form-grid">${identityFields}${templateFields}</div></div><div class="modal-foot"><span><i class="secure-dot"></i> 默认配置由服务端保存</span><div><button class="secondary-button" id="cancel-user-modal">取消</button><button class="primary-button" id="submit-user" ${state.metadata.channelTypes.length && state.metadata.groups.length ? "" : "disabled"}>${icon("check")} ${editingUser ? "保存默认值" : "创建用户"}</button></div></div></section></div>`;
+  return `<div class="modal-backdrop" id="user-modal-backdrop"><section class="modal account-modal" role="dialog" aria-modal="true"><div class="modal-head"><div><p class="eyebrow">ADMIN ONLY / ${editingUser ? "DEFAULTS" : "ACCOUNT"}</p><h2>${editingUser ? "配置渠道默认值" : "创建平台用户"}</h2></div><button class="close-button" id="close-user-modal" title="关闭">${icon("close")}</button></div><div class="modal-scroll"><div class="callout"><span>${icon("users")}</span><div><strong>${editingUser ? "调整账号默认配置" : "创建账号并分配渠道默认值"}</strong><small>供应商进入上传面板时自动选中类型、分组和模型，提交前仍可调整</small></div></div><div class="form-grid">${identityFields}${templateFields}</div></div><div class="modal-foot"><span><i class="secure-dot"></i> 默认配置由服务端保存</span><div><button class="secondary-button" id="cancel-user-modal">取消</button><button class="primary-button" id="submit-user" ${state.metadata.channelTypes.length && state.metadata.groups.length && templateModels.length ? "" : "disabled"}>${icon("check")} ${editingUser ? "保存默认值" : "创建用户"}</button></div></div></section></div>`;
 }
 function mappingRow(index, mapping = {}) { return `<div class="mapping-row"><input value="${esc(mapping.from || "")}" placeholder="源模型" data-map-from="${index}"><span>→</span><input value="${esc(mapping.to || "")}" placeholder="目标模型" data-map-to="${index}"><button type="button" class="remove-map" data-remove-map="${index}" title="删除映射">${icon("close")}</button></div>`; }
 
 function syncChannelDraft() {
   if (state.user?.role === "supplier") {
-    state.channelDraft = { ...state.channelDraft, suffix: document.querySelector("#channel-suffix")?.value || "", keys: document.querySelector("#keys")?.value || "", group: document.querySelector("#group")?.value || state.channelDraft.group };
+    state.channelDraft = { ...state.channelDraft, suffix: document.querySelector("#channel-suffix")?.value || "", keys: document.querySelector("#keys")?.value || "", group: document.querySelector("#group")?.value || state.channelDraft.group, models: [...document.querySelectorAll("#model-chips .chip.selected")].map((chip) => chip.dataset.model) };
     return;
   }
   const provider = document.querySelector("#provider");
@@ -168,8 +186,8 @@ function bindEvents() {
   document.querySelector("#batch")?.addEventListener("change", (event) => { syncChannelDraft(); state.batch = event.target.checked; render(); });
   document.querySelector("#keys")?.addEventListener("input", (event) => { const count = event.target.value.split(/\n+/).map((x) => x.trim()).filter(Boolean).length; document.querySelector("#key-counter").textContent = state.batch ? `${count} 枚待提交` : "单枚 Key"; });
   document.querySelectorAll("[data-step]").forEach((button) => button.addEventListener("click", () => { const input = document.querySelector("#discount"); input.value = Math.max(0, Number(input.value) + Number(button.dataset.step)).toFixed(3); }));
-  document.querySelector("#fill-models")?.addEventListener("click", () => document.querySelectorAll(".chip").forEach((chip) => chip.classList.add("selected")));
-  document.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => chip.classList.toggle("selected")));
+  document.querySelector("#fill-models")?.addEventListener("click", () => document.querySelectorAll("#model-chips .chip").forEach((chip) => chip.classList.add("selected")));
+  document.querySelectorAll("#model-chips .chip").forEach((chip) => chip.addEventListener("click", () => chip.classList.toggle("selected")));
   document.querySelector("#add-mapping")?.addEventListener("click", () => { syncChannelDraft(); state.mappings.push({}); render(); });
   document.querySelectorAll("[data-remove-map]").forEach((button) => button.addEventListener("click", () => { syncChannelDraft(); state.mappings.splice(Number(button.dataset.removeMap), 1); render(); }));
   document.querySelector("#submit-channel")?.addEventListener("click", submitChannel);
@@ -180,11 +198,24 @@ function bindEvents() {
   document.querySelector("#logout")?.addEventListener("click", logout);
   document.querySelector("#refresh-metadata")?.addEventListener("click", refreshMetadata);
   document.querySelector("#channel-suffix")?.addEventListener("input", (event) => { state.channelDraft.suffix = event.target.value; const preview = document.querySelector("#channel-name-preview"); if (preview) preview.textContent = `${state.user?.channelTemplate?.prefix || ""}${event.target.value.trim()}`; });
-  document.querySelector("#open-user-modal")?.addEventListener("click", () => { state.editingUserId = null; state.userModal = true; render(); });
+  document.querySelector("#open-user-modal")?.addEventListener("click", () => { state.editingUserId = null; state.userTemplateDraft = newUserTemplateDraft(); state.userModal = true; render(); });
   document.querySelector("#close-user-modal")?.addEventListener("click", closeUserModal); document.querySelector("#cancel-user-modal")?.addEventListener("click", closeUserModal);
   document.querySelector("#new-role")?.addEventListener("change", (event) => { const fields = document.querySelector("#supplier-template-fields"); if (!fields) return; fields.hidden = event.target.value !== "供应商"; fields.querySelectorAll("input,select").forEach((input) => { input.disabled = fields.hidden; }); const submit = document.querySelector("#submit-user"); if (submit) submit.disabled = !fields.hidden && (!state.metadata.channelTypes.length || !state.metadata.groups.length); });
+  document.querySelector("#new-channel-type")?.addEventListener("change", (event) => {
+    const models = modelsForType(event.target.value);
+    state.userTemplateDraft = { typeId: event.target.value, group: document.querySelector("#new-channel-group")?.value || "", prefix: document.querySelector("#new-channel-prefix")?.value || "", models };
+    const picker = document.querySelector(".template-model-picker");
+    if (picker) {
+      picker.innerHTML = models.map((model) => `<button type="button" class="chip selected" data-template-model="${esc(model)}">${esc(model)} <span>×</span></button>`).join("") || `<span class="empty-inline">该类型没有可用模型</span>`;
+      picker.querySelectorAll("[data-template-model]").forEach((chip) => chip.addEventListener("click", () => chip.classList.toggle("selected")));
+    }
+    const submit = document.querySelector("#submit-user");
+    if (submit) submit.disabled = !models.length;
+  });
+  document.querySelector("#fill-template-models")?.addEventListener("click", () => document.querySelectorAll("[data-template-model]").forEach((chip) => chip.classList.add("selected")));
+  document.querySelectorAll("[data-template-model]").forEach((chip) => chip.addEventListener("click", () => chip.classList.toggle("selected")));
   document.querySelector("#submit-user")?.addEventListener("click", submitUser);
-  document.querySelectorAll("[data-configure-user]").forEach((button) => button.addEventListener("click", () => { state.editingUserId = button.dataset.configureUser; state.userModal = true; render(); }));
+  document.querySelectorAll("[data-configure-user]").forEach((button) => button.addEventListener("click", () => { state.editingUserId = button.dataset.configureUser; state.userTemplateDraft = newUserTemplateDraft(state.users.find((item) => item.id === state.editingUserId)); state.userModal = true; render(); }));
   document.querySelectorAll("[data-toggle-user]").forEach((button) => button.addEventListener("click", () => toggleUser(button.dataset.toggleUser, button.dataset.userActive === "true")));
 }
 
@@ -196,7 +227,7 @@ async function refreshMetadata() { try { const button = document.querySelector("
 async function refreshTraffic() { if (state.apiMode) { try { const metrics = await apiRequest("/api/metrics/refresh", { method: "POST", body: "{}" }); state.traffic = { rpm: Number(metrics.rpm || 0), tpm: Number(metrics.tpm || 0) }; state.usageUpdated = metrics.sampledAt ? new Date(metrics.sampledAt).toLocaleTimeString("zh-CN", { hour12: false }) : state.usageUpdated; render(); toast(metrics.throttled ? "刷新过于频繁，已显示最新平台数据" : "平台 RPM / TPM 已刷新"); } catch (error) { toast(error instanceof Error ? error.message : "刷新失败"); } return; } state.traffic.rpm = Math.round(state.traffic.rpm * (0.96 + Math.random() * 0.08)); state.traffic.tpm = Math.round(state.traffic.tpm * (0.96 + Math.random() * 0.08)); state.usageUpdated = new Date().toLocaleTimeString("zh-CN", { hour12: false }); render(); toast("RPM / TPM 已刷新"); }
 async function refreshUsage() { if (state.apiMode) { try { await loadRemoteData(); render(); toast("使用统计已刷新"); } catch (error) { toast(error instanceof Error ? error.message : "刷新失败"); } return; } state.usageUpdated = new Date().toLocaleTimeString("zh-CN", { hour12: false }); state.channels.forEach((item) => { item.amount = Number((item.amount * (0.99 + Math.random() * 0.02)).toFixed(3)); item.latency = Math.max(80, item.latency + Math.round(Math.random() * 20 - 10)); }); render(); toast("使用统计已刷新"); }
 function closeModal() { state.modal = false; state.mappings = []; state.channelDraft = newChannelDraft(); render(); }
-function closeUserModal() { state.userModal = false; state.editingUserId = null; render(); }
+function closeUserModal() { state.userModal = false; state.editingUserId = null; state.userTemplateDraft = null; render(); }
 function toast(message) { const item = document.createElement("div"); item.className = "toast"; item.textContent = message; document.body.append(item); setTimeout(() => item.remove(), 2400); }
 function channelSubmitMessage(result) {
   if (result.mode === "simulation") return `模拟提交成功：${result.name}`;
@@ -207,14 +238,15 @@ async function submitChannel() {
   const keys = document.querySelector("#keys")?.value.split(/\n+/).map((item) => item.trim()).filter(Boolean) || [];
   if (state.user?.role === "supplier") {
     const suffix = document.querySelector("#channel-suffix")?.value.trim() || "";
+    const models = [...document.querySelectorAll("#model-chips .chip.selected")].map((chip) => chip.dataset.model);
     if (!state.user.channelTemplate) { toast("管理员尚未给当前账号分配渠道模板"); return; }
-    if (!suffix || !keys.length) { toast("请填写渠道后缀和至少一枚 Key"); return; }
+    if (!suffix || !keys.length || !models.length) { toast("请填写渠道后缀和至少一枚 Key，并选择模型"); return; }
     try {
-      const result = await apiRequest("/api/channels", { method: "POST", body: JSON.stringify({ suffix, keys, typeId: Number(document.querySelector("#provider").value), group: document.querySelector("#group").value }) });
+      const result = await apiRequest("/api/channels", { method: "POST", body: JSON.stringify({ suffix, keys, models, typeId: Number(document.querySelector("#provider").value), group: document.querySelector("#group").value }) });
       await loadRemoteData();
       closeModal();
       toast(channelSubmitMessage(result));
-    } catch (error) { toast(error instanceof Error ? error.message : "模拟提交失败"); }
+    } catch (error) { toast(error instanceof Error ? error.message : state.metadata.submissionMode === "upstream" ? "提交上游失败" : "模拟提交失败"); }
     return;
   }
   const name = document.querySelector("#channel-name").value.trim();
@@ -227,7 +259,7 @@ async function submitChannel() {
     try {
       const result = await apiRequest("/api/channels", { method: "POST", body: JSON.stringify({ name, typeId, models, keys, group: document.querySelector("#group").value, discount: Number(document.querySelector("#discount").value), autoDisable: document.querySelector("#auto-disable").checked, modelMapping }) });
       await loadRemoteData(); closeModal(); toast(channelSubmitMessage(result));
-    } catch (error) { toast(error instanceof Error ? error.message : "模拟提交失败"); }
+    } catch (error) { toast(error instanceof Error ? error.message : state.metadata.submissionMode === "upstream" ? "提交上游失败" : "模拟提交失败"); }
     return;
   }
   const channel = { id: `local-${Date.now().toString().slice(-5)}`, name, provider: channelType?.name || "未知类型", models, group: document.querySelector("#group").value || "default", discount: Number(document.querySelector("#discount").value).toFixed(3).replace(/0+$/, "").replace(/\.$/, ""), state: "模拟记录", keyCount: keys.length, updatedAt: "刚刚", amount: 0, latency: 0, createdAt: new Date().toLocaleString("zh-CN", { hour12: false }) };
@@ -237,10 +269,11 @@ async function submitUser() {
   const channelTypeId = Number(document.querySelector("#new-channel-type")?.value);
   const channelGroup = document.querySelector("#new-channel-group")?.value || "";
   const channelNamePrefix = document.querySelector("#new-channel-prefix")?.value.trim() || "";
+  const channelModels = [...document.querySelectorAll("[data-template-model].selected")].map((chip) => chip.dataset.templateModel);
   if (state.editingUserId) {
-    if (!channelTypeId || !channelGroup || !channelNamePrefix) { toast("请选择类型和分组，并填写渠道名前缀"); return; }
+    if (!channelTypeId || !channelGroup || !channelNamePrefix || !channelModels.length) { toast("请选择类型、分组和模型，并填写渠道名前缀"); return; }
     try {
-      await apiRequest(`/api/admin/users/${encodeURIComponent(state.editingUserId)}/template`, { method: "POST", body: JSON.stringify({ channelTypeId, channelGroup, channelNamePrefix }) });
+      await apiRequest(`/api/admin/users/${encodeURIComponent(state.editingUserId)}/template`, { method: "POST", body: JSON.stringify({ channelTypeId, channelGroup, channelNamePrefix, channelModels }) });
       await loadRemoteData(); closeUserModal(); toast("渠道模板已更新");
     } catch (error) { toast(error instanceof Error ? error.message : "保存失败"); }
     return;
@@ -249,16 +282,16 @@ async function submitUser() {
   const password = document.querySelector("#new-password").value;
   const role = document.querySelector("#new-role").value;
   if (!username || password.length < 8) { toast("用户名不能为空，密码至少需要 8 位"); return; }
-  if (role === "供应商" && (!channelTypeId || !channelGroup || !channelNamePrefix)) { toast("请为供应商选择类型、分组并填写渠道名前缀"); return; }
+  if (role === "供应商" && (!channelTypeId || !channelGroup || !channelNamePrefix || !channelModels.length)) { toast("请为供应商选择类型、分组和模型，并填写渠道名前缀"); return; }
   if (state.apiMode) {
     try {
-      await apiRequest("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password, role, channelTypeId, channelGroup, channelNamePrefix }) });
+      await apiRequest("/api/admin/users", { method: "POST", body: JSON.stringify({ username, password, role, channelTypeId, channelGroup, channelNamePrefix, channelModels }) });
       await loadRemoteData(); closeUserModal(); toast("用户创建成功");
     } catch (error) { toast(error instanceof Error ? error.message : "创建失败"); }
     return;
   }
   if (state.users.some((user) => user.username === username)) { toast("用户名已存在"); return; }
-  state.users.push({ username, role, channelTemplate: role === "供应商" ? { typeId: channelTypeId, group: channelGroup, prefix: channelNamePrefix } : null, status: "正常", createdAt: new Date().toLocaleString("zh-CN", { hour12: false }), keys: 0 });
+  state.users.push({ username, role, channelTemplate: role === "供应商" ? { typeId: channelTypeId, group: channelGroup, prefix: channelNamePrefix, models: channelModels } : null, status: "正常", createdAt: new Date().toLocaleString("zh-CN", { hour12: false }), keys: 0 });
   localStorage.setItem("qushu-users", JSON.stringify(state.users)); closeUserModal(); toast("用户创建成功");
 }
 async function toggleUser(id, isActive) { if (state.apiMode) { try { await apiRequest(`/api/admin/users/${encodeURIComponent(id)}/status`, { method: "POST", body: JSON.stringify({ isActive: !isActive }) }); await loadRemoteData(); render(); toast(`用户已${isActive ? "停用" : "启用"}`); } catch (error) { toast(error instanceof Error ? error.message : "操作失败"); } return; } const user = state.users.find((item) => item.id === id); if (user) { user.status = isActive ? "已停用" : "正常"; localStorage.setItem("qushu-users", JSON.stringify(state.users)); render(); } }

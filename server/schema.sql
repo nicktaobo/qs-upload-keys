@@ -8,6 +8,7 @@ create table if not exists app_users (
   channel_type_id integer,
   channel_group text,
   channel_name_prefix text,
+  channel_models jsonb not null default '[]'::jsonb,
   is_active boolean not null default true,
   created_at timestamptz not null default now()
 );
@@ -15,6 +16,7 @@ create table if not exists app_users (
 alter table app_users add column if not exists channel_type_id integer;
 alter table app_users add column if not exists channel_group text;
 alter table app_users add column if not exists channel_name_prefix text;
+alter table app_users add column if not exists channel_models jsonb not null default '[]'::jsonb;
 
 create table if not exists sessions (
   id text primary key,
